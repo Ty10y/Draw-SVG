@@ -183,6 +183,7 @@
 
       <button id="undo">Undo</button>
       <button id="clear">Clear</button>
+      <button id="fit" title="Scale and center everything to fit the canvas">Fit to view</button>
       <button id="import">Import SVG</button>
       <input type="file" id="file" accept=".svg,image/svg+xml" hidden>
     </div>
@@ -581,11 +582,36 @@
     return {shapes:found, errors};
   }
 
+  // Scale & center all shapes to fit inside the canvas, measuring the
+  // real rendered bounds so content that overflows (or has a missing /
+  // wrong viewBox) is brought fully into view.
+  function fitToView(pad){
+    if(!shapes.length) return false;
+    pad = pad == null ? 40 : pad;
+    render(); // ensure the DOM reflects the current shapes before measuring
+    let bb;
+    try{ bb = board.getBBox(); }catch(err){ return false; }
+    if(!bb) return false;
+    const availW = VB_W - 2*pad, availH = VB_H - 2*pad;
+    let k;
+    if(bb.width <= 0 && bb.height <= 0) return false;
+    else if(bb.width <= 0)  k = availH/bb.height;
+    else if(bb.height <= 0) k = availW/bb.width;
+    else k = Math.min(availW/bb.width, availH/bb.height);
+    if(!Number.isFinite(k) || k <= 0) return false;
+    const dx = pad + (availW - bb.width*k)/2  - bb.x*k;
+    const dy = pad + (availH - bb.height*k)/2 - bb.y*k;
+    shapes.forEach(s => scaleShape(s, k, dx, dy));
+    render();
+    return true;
+  }
+
   function load(text, replace){
     const {shapes:got, errors} = parseSVG(text);
     if(got.length){
       shapes = replace ? got : shapes.concat(got);
       render();
+      fitToView(); // guarantee shared / imported SVGs are fully visible
     }
     if(errors.length) notify(errors.join(' '));
     else if(got.length) notify(`Imported ${got.length} shape${got.length>1?'s':''}.`);
@@ -748,6 +774,10 @@
   });
   document.getElementById('clear').addEventListener('click', () => {
     shapes = []; render();
+  });
+  document.getElementById('fit').addEventListener('click', () => {
+    if(!fitToView()) notify('Nothing to fit yet.');
+    else notify('Fit to view.');
   });
 
   document.addEventListener('keydown', e => {
