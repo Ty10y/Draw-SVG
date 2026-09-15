@@ -110,18 +110,27 @@
   }
   .code-bar button:hover{border-color:#456068;background:#17242A}
 
-  pre{
-    margin:0;flex:1 1 auto;overflow:auto;
+  textarea#out{
+    margin:0;flex:1 1 auto;overflow:auto;display:block;
+    width:100%;border:0;resize:none;
     padding:16px 18px 40px;
+    background:var(--panel);
     font-family:"SF Mono",Menlo,Consolas,monospace;
     font-size:12.5px;line-height:1.65;
     color:var(--panel-ink);white-space:pre;tab-size:2;
+    spellcheck:false;
   }
-  pre .t{color:#7FD1C6}
-  pre .a{color:var(--amber)}
-  pre .v{color:#E4EDEA}
-  pre .c{color:#5E7570;font-style:italic}
-  pre .empty{color:var(--panel-dim);font-style:italic}
+  textarea#out:focus{outline:none}
+  textarea#out::placeholder{color:var(--panel-dim);font-style:italic}
+  textarea#out.err{box-shadow:inset 0 0 0 1px #B24A3E}
+
+  .code-status{
+    flex:0 0 auto;padding:8px 18px;font-size:12px;
+    border-top:1px solid #22333A;color:var(--panel-dim);
+    font-variant-numeric:tabular-nums;min-height:33px;
+  }
+  .code-status.err{color:#E88A7D}
+  .code-status.ok{color:#7FD1C6}
 
   @media (max-width:860px){
     main{flex-direction:column}
@@ -134,7 +143,7 @@
 
 <header>
   <h1>Draw to SVG</h1>
-  <p>Sketch on the grid. The markup on the right is the drawing.</p>
+  <p>Sketch on the grid, or edit the live markup on the right &mdash; each updates the other.</p>
 </header>
 
 <main>
@@ -193,7 +202,10 @@
       <button id="link">Copy link</button>
       <button id="download">Download</button>
     </div>
-    <pre id="out"><span class="empty">Nothing drawn yet.</span></pre>
+    <textarea id="out" spellcheck="false" autocomplete="off" autocapitalize="off"
+      autocorrect="off" wrap="off"
+      placeholder="Nothing drawn yet. Draw on the left, or type/paste SVG markup here to render it."></textarea>
+    <div class="code-status" id="status">Editable &middot; changes here update the drawing</div>
   </section>
 </main>
 
@@ -202,10 +214,15 @@
   "use strict";
 
   const VB_W = 1000, VB_H = 750;
-  const board = document.getElementById('board');
-  const out   = document.getElementById('out');
-  const meta  = document.getElementById('meta');
-  const hint  = document.getElementById('hint');
+  const board  = document.getElementById('board');
+  const out    = document.getElementById('out');
+  const meta   = document.getElementById('meta');
+  const hint   = document.getElementById('hint');
+  const status = document.getElementById('status');
+
+  // true while the user is typing in the code panel, so the canvas
+  // does not overwrite what they are editing.
+  let editingCode = false;
 
   let shapes = [];          // committed shapes
   let draft  = null;        // shape being drawn
@@ -299,17 +316,6 @@
     return `<${s.type} ` + attrs(s).map(([k,v])=>`${k}="${v}"`).join(' ') + '/>';
   }
 
-  function esc(t){
-    return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  function tagHighlighted(s){
-    const body = attrs(s)
-      .map(([k,v])=>`<span class="a">${k}</span>=<span class="v">"${esc(v)}"</span>`)
-      .join(' ');
-    return `<span class="t">&lt;${s.type}</span> ${body}<span class="t">/&gt;</span>`;
-  }
-
   function document_svg(){
     const open = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${VB_W} ${VB_H}">`;
     const body = shapes.map(s => '  ' + tag(s)).join('\n');
@@ -338,17 +344,15 @@
   }
 
   function writeCode(){
-    if(!shapes.length){
-      out.innerHTML = '<span class="empty">Nothing drawn yet.</span>';
-      meta.textContent = '0 shapes';
-      return;
-    }
-    const head = `<span class="t">&lt;svg</span> <span class="a">xmlns</span>=<span class="v">"http://www.w3.org/2000/svg"</span> <span class="a">viewBox</span>=<span class="v">"0 0 ${VB_W} ${VB_H}"</span><span class="t">&gt;</span>`;
-    const body = shapes.map(s => '  ' + tagHighlighted(s)).join('\n');
-    out.innerHTML = head + '\n' + body + '\n' + '<span class="t">&lt;/svg&gt;</span>';
+    // Don't clobber the textarea while the user is typing in it.
+    if(!editingCode) out.value = shapes.length ? document_svg() : '';
+    updateMeta();
+  }
+
+  function updateMeta(){
+    if(!shapes.length){ meta.textContent = '0 shapes'; return; }
     const chars = document_svg().length;
-    meta.textContent = `${shapes.length} shape${shapes.length>1?'':''} \u00b7 ${chars} chars`;
-    if(shapes.length === 1) meta.textContent = `1 shape \u00b7 ${chars} chars`;
+    meta.textContent = `${shapes.length} shape${shapes.length>1?'s':''} \u00b7 ${chars} chars`;
   }
 
   /* ---------- pointer input ---------- */
@@ -587,6 +591,57 @@
     else if(got.length) notify(`Imported ${got.length} shape${got.length>1?'s':''}.`);
     return got.length;
   }
+
+  /* ---------- live code editing ---------- */
+
+  function setStatus(msg, kind){
+    status.textContent = msg;
+    status.className = 'code-status' + (kind ? ' ' + kind : '');
+  }
+
+  // Parse whatever is in the textarea and mirror it onto the canvas.
+  function applyCodeEdit(){
+    const text = out.value.trim();
+    if(!text){
+      shapes = [];
+      out.classList.remove('err');
+      setStatus('Empty · draw on the left or type SVG here');
+      renderBoardOnly();
+      return;
+    }
+    const {shapes:got, errors} = parseSVG(text);
+    if(!got.length){
+      out.classList.add('err');
+      setStatus(errors[0] || 'No drawable shapes found.', 'err');
+      return; // keep the last valid drawing on screen
+    }
+    shapes = got;
+    out.classList.remove('err');
+    const skipped = errors.filter(e => !/No drawable/.test(e));
+    setStatus(
+      `${got.length} shape${got.length>1?'s':''} rendered` +
+        (skipped.length ? ' · ' + skipped.join(' ') : ''),
+      skipped.length ? 'err' : 'ok'
+    );
+    renderBoardOnly();
+  }
+
+  // Re-render the canvas from `shapes` without rewriting the textarea.
+  function renderBoardOnly(){
+    const wasEditing = editingCode;
+    editingCode = true;      // protect the textarea during render()
+    render();
+    editingCode = wasEditing;
+  }
+
+  out.addEventListener('focus', () => { editingCode = true; });
+  out.addEventListener('blur', () => {
+    editingCode = false;
+    // Normalize the markup back to canonical form once the user is done.
+    if(shapes.length && !out.classList.contains('err')) out.value = document_svg();
+    setStatus('Editable · changes here update the drawing');
+  });
+  out.addEventListener('input', applyCodeEdit);
 
   let notifyTimer;
   function notify(msg){
